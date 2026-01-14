@@ -1,0 +1,24 @@
+services:
+  redis:
+    image: redis:8
+    container_name: claude-memory-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --protected-mode no
+    restart: unless-stopped
+
+  embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.2
+    container_name: claude-memory-embeddings
+    command: --model-id nomic-ai/nomic-embed-text-v1.5
+    ports:
+      - "8080:80"
+    volumes:
+      - embeddings-data:/data
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  embeddings-data:
