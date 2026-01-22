@@ -48,6 +48,7 @@ memo remember <type> "content" --tags tag1,tag2
 ## When to Use
 
 - **Session start**: Run `memo context` to recover project knowledge
-- **Learning something**: `memo remember learned "..."`
+- **Before answering**: Check `memo similar "topic" --here` if unsure about project details
+- **Learning something**: `memo remember learned "..."` - save proactively, don't wait to be asked
 - **User preference**: `memo remember preference "..."` (consider keeping global - no project tag)
 - **Before context compaction**: Save important discoveries
