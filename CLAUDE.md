@@ -22,13 +22,15 @@ memo remember <type> "content" --tags tag1,tag2
 | `memo context [limit]` | Show memories for current project |
 | `memo similar <query> [--here] [--limit N]` | Semantic search |
 | `memo recall <query>` | Full-text search |
-| `memo remember <type> <content> [--tags]` | Store a memory |
+| `memo remember <type> <content> [--tags] [--force]` | Store a memory (dedup checked; --force to skip) |
 | `memo get <id>` | View a specific memory |
 | `memo update <id> <content>` | Edit a memory's content |
 | `memo tag <id> <tag>` | Add a tag to a memory |
 | `memo related <id>` | Find similar memories |
 | `memo forget <id>` | Delete a memory |
+| `memo merge <id1> <id2> ["content"]` | Merge two memories (optional content override) |
 | `memo list [--type T] [--project P] [--here]` | List with filters |
+| `memo prune [--days N] [--delete]` | Find stale memories (dry run by default) |
 | `memo stats` | Show counts by type |
 | `memo projects` | List all projects with memory counts |
 

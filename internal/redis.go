@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -337,6 +338,18 @@ func (c *Client) Projects() (map[string]int, error) {
 	return projects, nil
 }
 
+// AllMemories returns all memories (for pruning/bulk operations)
+func (c *Client) AllMemories() ([]Memory, error) {
+	result, err := c.rdb.Do(ctx, "FT.SEARCH", IndexName, "*",
+		"LIMIT", "0", "1000",
+		"RETURN", "1", "$",
+	).Result()
+	if err != nil {
+		return nil, err
+	}
+	return parseSearchResults(result)
+}
+
 // Stats returns memory statistics
 func (c *Client) Stats() (map[string]int, error) {
 	stats := make(map[string]int)
@@ -533,6 +546,29 @@ func (c *Client) GetAllMemoryIDs() ([]string, error) {
 // DeleteVectorSet removes all vectors for reindexing
 func (c *Client) DeleteVectorSet() error {
 	return c.rdb.Del(ctx, VectorSet).Err()
+}
+
+// TextSearch performs full-text search using FT.SEARCH for dedup fallback
+func (c *Client) TextSearch(query string, limit int) ([]Memory, error) {
+	// Escape special RediSearch characters
+	escaped := escapeRedisQuery(query)
+	result, err := c.rdb.Do(ctx, "FT.SEARCH", IndexName, escaped,
+		"LIMIT", "0", fmt.Sprint(limit),
+		"RETURN", "1", "$",
+	).Result()
+	if err != nil {
+		return nil, err
+	}
+	return parseSearchResults(result)
+}
+
+// escapeRedisQuery escapes special characters for RediSearch queries
+func escapeRedisQuery(q string) string {
+	special := []string{",", ".", "<", ">", "{", "}", "[", "]", "\"", "'", ":", ";", "!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "-", "+", "=", "~"}
+	for _, ch := range special {
+		q = strings.ReplaceAll(q, ch, "\\"+ch)
+	}
+	return q
 }
 
 // parseSearchResults parses FT.SEARCH results into Memory structs

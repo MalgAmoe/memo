@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"memo/internal"
 )
@@ -51,6 +52,10 @@ func main() {
 		err = cmdStats(client)
 	case "projects":
 		err = cmdProjects(client)
+	case "prune":
+		err = cmdPrune(client, args)
+	case "merge":
+		err = cmdMerge(client, args)
 	case "help", "-h", "--help":
 		printHelp()
 	default:
@@ -76,19 +81,22 @@ func cmdInit(c *internal.Client) error {
 
 func cmdRemember(c *internal.Client, args []string) error {
 	if len(args) < 2 {
-		return fmt.Errorf("usage: memo remember <type> <content> [--tags t1,t2]")
+		return fmt.Errorf("usage: memo remember <type> <content> [--tags t1,t2] [--force]")
 	}
 
 	memType := args[0]
 
-	// Parse content and tags
+	// Parse content, tags, and flags
 	var contentParts []string
 	var tags []string
+	force := false
 
 	for i := 1; i < len(args); i++ {
 		if args[i] == "--tags" && i+1 < len(args) {
 			tags = strings.Split(args[i+1], ",")
 			i++
+		} else if args[i] == "--force" {
+			force = true
 		} else {
 			contentParts = append(contentParts, args[i])
 		}
@@ -99,20 +107,77 @@ func cmdRemember(c *internal.Client, args []string) error {
 		return fmt.Errorf("content cannot be empty")
 	}
 
+	// Build embedding input: prepend tags for better semantic signal
+	embeddingInput := content
+	if len(tags) > 0 {
+		embeddingInput = strings.Join(tags, " ") + " " + content
+	}
+
+	// Check for duplicates (unless --force)
+	var embedding []float64
+	if !force {
+		var blocked bool
+
+		// Try vector similarity first
+		var err error
+		embedding, err = internal.GetDocumentEmbedding(embeddingInput)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: embedding service unavailable, using text search for dedup\n")
+		} else {
+			dupes, simErr := c.Similar(embedding, 3, "")
+			if simErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: vector search failed (%v), falling back to text search\n", simErr)
+			} else {
+				for _, d := range dupes {
+					score := parseScore(d.Score)
+					if score >= 0.93 {
+						fmt.Printf("Duplicate: [%s] (%.0f%%) %s\n", d.Memory.ID, score*100, d.Memory.Content)
+						blocked = true
+					} else if score >= 0.85 {
+						fmt.Printf("Similar:   [%s] (%.0f%%) %s\n", d.Memory.ID, score*100, d.Memory.Content)
+					}
+				}
+			}
+		}
+
+		// Fall back to text search if embedding failed or vector search failed
+		if embedding == nil || !blocked {
+			textResults, textErr := c.TextSearch(content, 5)
+			if textErr == nil {
+				for _, m := range textResults {
+					if blocked {
+						break
+					}
+					// Skip if already reported by vector search
+					if m.Content == content {
+						fmt.Printf("Duplicate: [%s] (text match) %s\n", m.ID, m.Content)
+						blocked = true
+					}
+				}
+			}
+		}
+
+		if blocked {
+			fmt.Printf("\nSkipping - use --force to save anyway, or memo update <id> to edit existing.\n")
+			return nil
+		}
+	}
+
 	project := internal.GetProject()
 	memo, err := c.Remember(memType, content, tags, project)
 	if err != nil {
 		return err
 	}
 
-	// Embed asynchronously (use document embedding for storage)
-	go func() {
-		embedding, err := internal.GetDocumentEmbedding(content)
-		if err != nil {
-			return
-		}
+	// Embed synchronously to avoid race conditions between consecutive calls
+	if embedding != nil {
 		c.EmbedMemory(memo.ID, embedding)
-	}()
+	} else {
+		emb, err := internal.GetDocumentEmbedding(embeddingInput)
+		if err == nil {
+			c.EmbedMemory(memo.ID, emb)
+		}
+	}
 
 	fmt.Printf("Remembered [%s]: %s\n", memo.ID, content)
 	return nil
@@ -287,6 +352,12 @@ func cmdList(c *internal.Client, args []string) error {
 	return nil
 }
 
+func parseScore(s string) float64 {
+	var f float64
+	fmt.Sscanf(s, "%f", &f)
+	return f
+}
+
 func getProjectFromTags(tags []string) string {
 	for _, tag := range tags {
 		if len(tag) > 8 && tag[:8] == "project:" {
@@ -405,6 +476,135 @@ func cmdRelated(c *internal.Client, args []string) error {
 	return nil
 }
 
+func cmdPrune(c *internal.Client, args []string) error {
+	days := 30
+	dryRun := true
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--days":
+			if i+1 < len(args) {
+				if d, err := strconv.Atoi(args[i+1]); err == nil {
+					days = d
+				}
+				i++
+			}
+		case "--delete":
+			dryRun = false
+		}
+	}
+
+	memos, err := c.AllMemories()
+	if err != nil {
+		return err
+	}
+
+	cutoff := time.Now().AddDate(0, 0, -days)
+	var candidates []internal.Memory
+
+	for _, m := range memos {
+		if m.AccessCount > 0 {
+			continue
+		}
+		created, err := time.Parse("2006-01-02T15:04:05Z", m.Created)
+		if err != nil {
+			continue
+		}
+		if created.Before(cutoff) {
+			candidates = append(candidates, m)
+		}
+	}
+
+	if len(candidates) == 0 {
+		fmt.Printf("No stale memories found (access_count=0, older than %d days).\n", days)
+		return nil
+	}
+
+	if dryRun {
+		fmt.Printf("Stale memories (access_count=0, older than %d days):\n\n", days)
+		for _, m := range candidates {
+			proj := getProjectFromTags(m.Tags)
+			age := "?"
+			if created, err := time.Parse("2006-01-02T15:04:05Z", m.Created); err == nil {
+				ageDays := int(time.Since(created).Hours() / 24)
+				age = fmt.Sprintf("%dd", ageDays)
+			}
+			fmt.Printf("[%s] (%s) [%s] (%d accesses, %s old) %s\n", m.ID, m.Type, proj, m.AccessCount, age, m.Content)
+		}
+		fmt.Printf("\n%d candidates. Use --delete to remove them.\n", len(candidates))
+	} else {
+		for _, m := range candidates {
+			c.Forget(m.ID)
+			fmt.Printf("Pruned [%s]: %s\n", m.ID, m.Content)
+		}
+		fmt.Printf("\nPruned %d memories.\n", len(candidates))
+	}
+	return nil
+}
+
+func cmdMerge(c *internal.Client, args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: memo merge <id1> <id2> [\"merged content\"]")
+	}
+
+	m1, err := c.Get(args[0])
+	if err != nil {
+		return fmt.Errorf("first memo: %w", err)
+	}
+	m2, err := c.Get(args[1])
+	if err != nil {
+		return fmt.Errorf("second memo: %w", err)
+	}
+
+	// Use provided content or fall back to concatenation
+	var merged string
+	if len(args) >= 3 {
+		merged = strings.Join(args[2:], " ")
+	} else {
+		merged = m1.Content + " | " + m2.Content
+	}
+
+	// Combine tags (deduplicate)
+	tagSet := make(map[string]bool)
+	for _, t := range m1.Tags {
+		tagSet[t] = true
+	}
+	for _, t := range m2.Tags {
+		tagSet[t] = true
+	}
+
+	// Update first memo with merged content
+	if err := c.Update(args[0], merged); err != nil {
+		return err
+	}
+
+	// Add any new tags from m2
+	for _, t := range m2.Tags {
+		found := false
+		for _, t1 := range m1.Tags {
+			if t == t1 {
+				found = true
+				break
+			}
+		}
+		if !found {
+			c.AddTag(args[0], t)
+		}
+	}
+
+	// Delete second memo
+	c.Forget(args[1])
+
+	// Re-embed
+	embedding, err := internal.GetDocumentEmbedding(merged)
+	if err == nil {
+		c.EmbedMemory(args[0], embedding)
+	}
+
+	fmt.Printf("Merged [%s] + [%s] → [%s]: %s\n", args[0], args[1], args[0], merged)
+	return nil
+}
+
 func cmdReindex(c *internal.Client) error {
 	fmt.Println("Reindexing all memories...")
 
@@ -430,7 +630,13 @@ func cmdReindex(c *internal.Client) error {
 
 		fmt.Printf("  %s: %.50s...\n", id, memo.Content)
 
-		embedding, err := internal.GetDocumentEmbedding(memo.Content)
+		// Prepend tags for better semantic signal
+		embInput := memo.Content
+		if len(memo.Tags) > 0 {
+			embInput = strings.Join(memo.Tags, " ") + " " + memo.Content
+		}
+
+		embedding, err := internal.GetDocumentEmbedding(embInput)
 		if err != nil {
 			fmt.Printf("    Error: %v\n", err)
 			continue
@@ -489,7 +695,7 @@ func printHelp() {
 
 Commands:
   init                              Initialize the search index
-  remember <type> <content> [--tags t1,t2]  Store a memory
+  remember <type> <content> [--tags t1,t2] [--force]  Store a memory
   recall <query> [limit]            Search memories (full-text)
   similar <query> [--here] [--limit N]  Semantic search (--here = this project)
   context [limit]                   Show memories for current project
@@ -499,6 +705,8 @@ Commands:
   tag <id> <tag>                    Add a tag to a memory
   related <id> [limit]              Find memories similar to one
   forget <id>                       Delete a memory
+  merge <id1> <id2> ["content"]      Merge two memories (optional content override)
+  prune [--days N] [--delete]       Find stale memories (default: dry run)
   reindex                           Generate embeddings for all memories
   stats                             Show memory statistics
   projects                          List all projects with memory counts
