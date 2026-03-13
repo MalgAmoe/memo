@@ -548,6 +548,39 @@ func (c *Client) DeleteVectorSet() error {
 	return c.rdb.Del(ctx, VectorSet).Err()
 }
 
+// GetBrief returns the stored brief for a project
+func (c *Client) GetBrief(project string) (string, error) {
+	result, err := c.rdb.Get(ctx, "brief:"+project).Result()
+	if err != nil {
+		return "", err
+	}
+	return result, nil
+}
+
+// SetBrief stores a brief for a project
+func (c *Client) SetBrief(project, brief string) error {
+	return c.rdb.Set(ctx, "brief:"+project, brief, 0).Err()
+}
+
+// IsBriefStale checks if the brief needs regeneration
+func (c *Client) IsBriefStale(project string) bool {
+	result, err := c.rdb.Get(ctx, "brief:"+project+":stale").Result()
+	if err != nil {
+		return true // No stale flag means never generated
+	}
+	return result == "1"
+}
+
+// MarkBriefStale marks a project's brief as needing regeneration
+func (c *Client) MarkBriefStale(project string) {
+	c.rdb.Set(ctx, "brief:"+project+":stale", "1", 0)
+}
+
+// MarkBriefFresh marks a project's brief as up to date
+func (c *Client) MarkBriefFresh(project string) {
+	c.rdb.Set(ctx, "brief:"+project+":stale", "0", 0)
+}
+
 // TextSearch performs full-text search using FT.SEARCH for dedup fallback
 func (c *Client) TextSearch(query string, limit int) ([]Memory, error) {
 	// Escape special RediSearch characters

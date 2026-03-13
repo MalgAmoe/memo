@@ -56,6 +56,8 @@ func main() {
 		err = cmdPrune(client, args)
 	case "merge":
 		err = cmdMerge(client, args)
+	case "brief":
+		err = cmdBrief(client, args)
 	case "help", "-h", "--help":
 		printHelp()
 	default:
@@ -117,6 +119,7 @@ func cmdRemember(c *internal.Client, args []string) error {
 	var embedding []float64
 	if !force {
 		var blocked bool
+		var hasRelated bool
 
 		// Try vector similarity first
 		var err error
@@ -124,7 +127,7 @@ func cmdRemember(c *internal.Client, args []string) error {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: embedding service unavailable, using text search for dedup\n")
 		} else {
-			dupes, simErr := c.Similar(embedding, 3, "")
+			dupes, simErr := c.Similar(embedding, 5, "")
 			if simErr != nil {
 				fmt.Fprintf(os.Stderr, "Warning: vector search failed (%v), falling back to text search\n", simErr)
 			} else {
@@ -135,6 +138,10 @@ func cmdRemember(c *internal.Client, args []string) error {
 						blocked = true
 					} else if score >= 0.85 {
 						fmt.Printf("Similar:   [%s] (%.0f%%) %s\n", d.Memory.ID, score*100, d.Memory.Content)
+						hasRelated = true
+					} else if score >= 0.70 {
+						fmt.Printf("Related:   [%s] (%.0f%%) %s\n", d.Memory.ID, score*100, d.Memory.Content)
+						hasRelated = true
 					}
 				}
 			}
@@ -148,7 +155,6 @@ func cmdRemember(c *internal.Client, args []string) error {
 					if blocked {
 						break
 					}
-					// Skip if already reported by vector search
 					if m.Content == content {
 						fmt.Printf("Duplicate: [%s] (text match) %s\n", m.ID, m.Content)
 						blocked = true
@@ -160,6 +166,10 @@ func cmdRemember(c *internal.Client, args []string) error {
 		if blocked {
 			fmt.Printf("\nSkipping - use --force to save anyway, or memo update <id> to edit existing.\n")
 			return nil
+		}
+
+		if hasRelated {
+			fmt.Println("  ^ Consider: memo update <id> if this supersedes an existing memory.")
 		}
 	}
 
@@ -178,6 +188,9 @@ func cmdRemember(c *internal.Client, args []string) error {
 			c.EmbedMemory(memo.ID, emb)
 		}
 	}
+
+	// Mark brief as stale so it regenerates on next context call
+	c.MarkBriefStale(project)
 
 	fmt.Printf("Remembered [%s]: %s\n", memo.ID, content)
 	return nil
@@ -289,9 +302,69 @@ func cmdContext(c *internal.Client, args []string) error {
 		return nil
 	}
 
+	// Show brief if available (always show cached, even if stale)
+	brief, _ := c.GetBrief(project)
+	if brief != "" {
+		if c.IsBriefStale(project) {
+			fmt.Println(brief)
+			fmt.Println()
+			fmt.Println("(brief is updating...)")
+		} else {
+			fmt.Println(brief)
+		}
+		fmt.Println()
+		fmt.Println("---")
+		fmt.Println()
+	}
+
 	for _, m := range memos {
 		fmt.Printf("[%s] (%s) %s\n", m.ID, m.Type, m.Content)
 	}
+	return nil
+}
+
+func cmdBrief(c *internal.Client, args []string) error {
+	project := internal.GetProject()
+
+	// memo brief --refresh forces regeneration
+	forceRefresh := false
+	for _, a := range args {
+		if a == "--refresh" {
+			forceRefresh = true
+		}
+	}
+
+	if forceRefresh {
+		c.MarkBriefStale(project)
+	}
+
+	if c.IsBriefStale(project) {
+		allMemos, err := c.Context(project, 100)
+		if err != nil {
+			return err
+		}
+		if len(allMemos) < 3 {
+			fmt.Println("Not enough memories to generate a brief (need at least 3).")
+			return nil
+		}
+
+		currentBrief, _ := c.GetBrief(project)
+		fmt.Println("Generating brief...")
+		brief, err := internal.GenerateBrief(project, currentBrief, allMemos)
+		if err != nil {
+			return err
+		}
+		c.SetBrief(project, brief)
+		c.MarkBriefFresh(project)
+	}
+
+	brief, err := c.GetBrief(project)
+	if err != nil || brief == "" {
+		fmt.Println("No brief yet. Add some memories first, then run: memo brief --refresh")
+		return nil
+	}
+
+	fmt.Printf("Brief for %s:\n\n%s\n", project, brief)
 	return nil
 }
 
@@ -396,6 +469,7 @@ func cmdForget(c *internal.Client, args []string) error {
 		return err
 	}
 
+	c.MarkBriefStale(internal.GetProject())
 	fmt.Printf("Forgot: %s\n", args[0])
 	return nil
 }
@@ -437,6 +511,7 @@ func cmdUpdate(c *internal.Client, args []string) error {
 		c.EmbedMemory(id, embedding)
 	}()
 
+	c.MarkBriefStale(internal.GetProject())
 	fmt.Printf("Updated [%s]: %s\n", id, content)
 	return nil
 }
@@ -601,6 +676,7 @@ func cmdMerge(c *internal.Client, args []string) error {
 		c.EmbedMemory(args[0], embedding)
 	}
 
+	c.MarkBriefStale(internal.GetProject())
 	fmt.Printf("Merged [%s] + [%s] → [%s]: %s\n", args[0], args[1], args[0], merged)
 	return nil
 }
@@ -705,6 +781,7 @@ Commands:
   tag <id> <tag>                    Add a tag to a memory
   related <id> [limit]              Find memories similar to one
   forget <id>                       Delete a memory
+  brief [--refresh]                  Show/regenerate project understanding
   merge <id1> <id2> ["content"]      Merge two memories (optional content override)
   prune [--days N] [--delete]       Find stale memories (default: dry run)
   reindex                           Generate embeddings for all memories
