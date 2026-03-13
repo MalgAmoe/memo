@@ -8,13 +8,11 @@ import (
 	"os"
 )
 
-var embeddingsURL = "http://localhost:8080/embed"
-
-func init() {
-	// Allow override via environment variable
+func getEmbeddingsURL() string {
 	if url := os.Getenv("EMBEDDINGS_URL"); url != "" {
-		embeddingsURL = url
+		return url
 	}
+	return "http://localhost:8080/embed"
 }
 
 type teiRequest struct {
@@ -40,7 +38,7 @@ func getEmbeddingWithPrefix(text string) ([]float64, error) {
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", embeddingsURL, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("POST", getEmbeddingsURL(), bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, err
 	}

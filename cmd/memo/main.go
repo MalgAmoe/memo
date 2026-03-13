@@ -58,6 +58,8 @@ func main() {
 		err = cmdMerge(client, args)
 	case "brief":
 		err = cmdBrief(client, args)
+	case "dedup":
+		err = cmdDedup(client, args)
 	case "help", "-h", "--help":
 		printHelp()
 	default:
@@ -766,6 +768,64 @@ func cmdProjects(c *internal.Client) error {
 	return nil
 }
 
+func cmdDedup(c *internal.Client, args []string) error {
+	// Parse --project flag or default to current project
+	project := internal.GetProject()
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--project" && i+1 < len(args) {
+			project = args[i+1]
+			i++
+		}
+	}
+
+	memos, err := c.Context(project, 100)
+	if err != nil {
+		return err
+	}
+
+	if len(memos) < 2 {
+		fmt.Println("Not enough memories to check.")
+		return nil
+	}
+
+	fmt.Printf("Analyzing %d memories for project: %s\n\n", len(memos), project)
+
+	// Build memory list
+	var memList string
+	for _, m := range memos {
+		memList += fmt.Sprintf("[%s] (%s) %s\n", m.ID, m.Type, m.Content)
+	}
+
+	prompt := fmt.Sprintf(`You are reviewing all memories for a project to find redundancies, contradictions, and outdated information.
+
+Project: %s
+
+Memories:
+%s
+
+Find any memories that should be cleaned up. For each issue found, classify as:
+- MERGE id1 id2: Two memories that say the same thing. Provide merged content.
+- UPDATE id: A memory that is outdated or has been superseded by another. Provide updated content.
+- DELETE id: A memory that is fully redundant (completely contained in another) or no longer true.
+
+Be strict: only flag genuine problems. Related but distinct facts should be left alone.
+If nothing needs cleanup, just say "No issues found."
+
+For each issue, respond in this exact format:
+ACTION: ids
+  reason: one line why
+  content: new content (for MERGE/UPDATE)
+  command: the memo CLI command to execute`, project, memList)
+
+	result, err := internal.CallLLM(prompt)
+	if err != nil {
+		return fmt.Errorf("LLM error: %w", err)
+	}
+
+	fmt.Println(result)
+	return nil
+}
+
 func printHelp() {
 	fmt.Println(`memo - Claude's persistent memory system
 
@@ -782,6 +842,7 @@ Commands:
   related <id> [limit]              Find memories similar to one
   forget <id>                       Delete a memory
   brief [--refresh]                  Show/regenerate project understanding
+  dedup [--project P]                Find redundant/outdated memories (LLM-powered)
   merge <id1> <id2> ["content"]      Merge two memories (optional content override)
   prune [--days N] [--delete]       Find stale memories (default: dry run)
   reindex                           Generate embeddings for all memories

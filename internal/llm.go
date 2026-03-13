@@ -8,22 +8,6 @@ import (
 	"os"
 )
 
-var (
-	llmURL   = "https://api.fireworks.ai/inference/v1/chat/completions"
-	llmModel = "accounts/fireworks/models/kimi-k2p5"
-	llmKey   string
-)
-
-func init() {
-	llmKey = os.Getenv("FIREWORKS_API_KEY")
-	if url := os.Getenv("LLM_URL"); url != "" {
-		llmURL = url
-	}
-	if model := os.Getenv("LLM_MODEL"); model != "" {
-		llmModel = model
-	}
-}
-
 type chatRequest struct {
 	Model    string        `json:"model"`
 	Messages []chatMessage `json:"messages"`
@@ -42,46 +26,21 @@ type chatResponse struct {
 	} `json:"choices"`
 }
 
-// GenerateBrief synthesizes a project brief from memories
-func GenerateBrief(projectName string, currentBrief string, memories []Memory) (string, error) {
+// CallLLM sends a prompt to the LLM and returns the response
+func CallLLM(prompt string) (string, error) {
+	llmURL := "https://api.fireworks.ai/inference/v1/chat/completions"
+	llmModel := "accounts/fireworks/models/kimi-k2p5"
+	llmKey := os.Getenv("FIREWORKS_API_KEY")
+
+	if u := os.Getenv("LLM_URL"); u != "" {
+		llmURL = u
+	}
+	if m := os.Getenv("LLM_MODEL"); m != "" {
+		llmModel = m
+	}
+
 	if llmKey == "" {
 		return "", fmt.Errorf("FIREWORKS_API_KEY not set")
-	}
-
-	// Build the memory list
-	var memList string
-	for _, m := range memories {
-		memList += fmt.Sprintf("- [%s] %s\n", m.Type, m.Content)
-	}
-
-	var prompt string
-	if currentBrief == "" {
-		prompt = fmt.Sprintf(`You are synthesizing a project brief from individual memory fragments.
-
-Project: %s
-
-Memories:
-%s
-
-Write a concise project brief (3-5 paragraphs) that synthesizes these fragments into a coherent understanding. Cover:
-- What the project is and its purpose
-- Key technical decisions and why they were made
-- Current state and recent developments
-- Important gotchas or things to remember
-
-Write in present tense, as a reference document. No headers, no bullet points — flowing prose that gives someone complete context to work on this project. Be specific, not generic.`, projectName, memList)
-	} else {
-		prompt = fmt.Sprintf(`You are updating a project brief with new information.
-
-Project: %s
-
-Current brief:
-%s
-
-All memories (including new ones):
-%s
-
-Update the brief to incorporate any new information. Keep it 3-5 paragraphs of flowing prose. Preserve important existing context. If new memories contradict old information, favor the new. No headers, no bullet points.`, projectName, currentBrief, memList)
 	}
 
 	reqBody := chatRequest{
@@ -124,4 +83,44 @@ Update the brief to incorporate any new information. Keep it 3-5 paragraphs of f
 	}
 
 	return result.Choices[0].Message.Content, nil
+}
+
+// GenerateBrief synthesizes a project brief from memories
+func GenerateBrief(projectName string, currentBrief string, memories []Memory) (string, error) {
+	var memList string
+	for _, m := range memories {
+		memList += fmt.Sprintf("- [%s] %s\n", m.Type, m.Content)
+	}
+
+	var prompt string
+	if currentBrief == "" {
+		prompt = fmt.Sprintf(`You are synthesizing a project brief from individual memory fragments.
+
+Project: %s
+
+Memories:
+%s
+
+Write a concise project brief (3-5 paragraphs) that synthesizes these fragments into a coherent understanding. Cover:
+- What the project is and its purpose
+- Key technical decisions and why they were made
+- Current state and recent developments
+- Important gotchas or things to remember
+
+Write in present tense, as a reference document. No headers, no bullet points — flowing prose that gives someone complete context to work on this project. Be specific, not generic.`, projectName, memList)
+	} else {
+		prompt = fmt.Sprintf(`You are updating a project brief with new information.
+
+Project: %s
+
+Current brief:
+%s
+
+All memories (including new ones):
+%s
+
+Update the brief to incorporate any new information. Keep it 3-5 paragraphs of flowing prose. Preserve important existing context. If new memories contradict old information, favor the new. No headers, no bullet points.`, projectName, currentBrief, memList)
+	}
+
+	return CallLLM(prompt)
 }
